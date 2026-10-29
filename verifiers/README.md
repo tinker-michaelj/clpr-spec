@@ -4,38 +4,15 @@ Each subdirectory here documents the verifier specification for one chain. A ver
 
 ## Interface
 
-All verifiers implement `IClprVerifier`:
+The normative interface is in [the CLPR service specification](../clpr-service-spec.md#31-verifier-contract-interface).
+`verifyConfig` establishes the channel context and authority. `verifyBundle` returns
+proven channel data and messages or an authority-only update. Its final
+`has_channel_state` flag explicitly distinguishes those cases; all implementations
+used by the revised service must return it.
 
-```solidity
-interface IClprVerifier {
-    function verifyConfig(bytes calldata configProofBytes, bytes32 channelId)
-        external view returns (
-            bytes memory channelContext,
-            string memory chainId,
-            bytes memory serviceAddress,
-            uint96 peerConfigNanos,
-            Throttles memory throttles,
-            bytes memory initialTrustAnchor,
-            bytes memory initialTrustAnchorId,
-            Endpoint[] memory seedEndpoints
-        );
-
-    function verifyBundle(
-        bytes calldata proofBytes,
-        bytes calldata trustAnchor,
-        bytes calldata channelContext
-    ) external view returns (
-        QueueMetadata memory metadata,
-        bytes[] memory messagePayloads,
-        bytes memory newTrustAnchor,
-        bytes memory newTrustAnchorId
-    );
-}
-```
-
-`verifyConfig` is called once at channel setup to authenticate the remote chain's configuration and derive the initial trust anchor. `verifyBundle` is called on every bundle submission to authenticate state and advance the trust anchor when the remote chain's signing authority rotates.
-
-Both functions are `view` — all verification is stateless. State transitions are applied by `ClprService` using the return values.
+Verification is stateless. Only the service applies returned authority and channel
+changes. See [HieroProof V1](hiero/proof_envelope.md) for the opt-in key-provenance
+profile, its proposed HAPI schema, and the authorization-versus-adoption distinction.
 
 ## Directory layout
 
@@ -51,7 +28,7 @@ Each chain directory contains three files:
 
 | Chain | Directory | Trust anchor type | Status |
 |-------|-----------|-------------------|--------|
-| Hiero | `hiero/` | `ledger_id` bytes (TSS/hinTS) | Production |
+| Hiero | `hiero/` | Ledger ID/WRAPS, or explicitly trusted hinTS VK | Key-provenance extension proposed |
 | QBFT (Besu) | `qbft/` | ABI-encoded validator + epoch | Production |
 
 ## Standard file outlines

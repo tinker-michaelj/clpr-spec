@@ -1,0 +1,27 @@
+// SPDX-License-Identifier: Apache-2.0
+syntax = "proto3";
+
+package com.hedera.hapi.block.stream;
+
+import "block/stream/state_proof.proto";
+
+// Proposed HAPI schema addition. This specification is the wire contract until
+// published in HAPI beside StateProof; StateProof itself is unchanged.
+message HieroProof {
+  uint32 format_version = 1;
+  oneof payload {
+    StateProof state_proof = 2;
+    HintsKeyProvenanceChain key_provenance = 3;
+  }
+}
+
+message HintsKeyProvenanceChain {
+  bytes initial_verification_key = 1;
+  repeated HintsKeyProvenanceLink links = 2;
+}
+
+message HintsKeyProvenanceLink {
+  bytes next_verification_key = 1;
+  // hinTS aggregate over exactly next_verification_key, under the preceding VK.
+  bytes signature = 2;
+}
