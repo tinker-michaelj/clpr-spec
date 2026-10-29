@@ -11,6 +11,22 @@ We select signed successor authorization as sufficient for this opt-in verifier
 profile. Requiring adoption would require additional evidence beyond those
 signatures. The decision deliberately accepts the candidate-branch and key-reuse
 consequences documented in the normative [HieroProof V1 profile](../verifiers/hiero/proof_envelope.md).
+This is a named exception to CLPR's default requirement for state-proven successor
+authority; it does not relax the other verifier profiles.
+
+Submission is permissionless: an unrelated party may submit a valid authorization
+published in a proof vote before adoption, despite endpoints following the adopted
+provenance queue. Selecting an unadopted or abandoned branch can irreversibly strand
+the receiver. No administrative re-anchor or force-close mechanism is introduced.
+Unacknowledged outbound messages and required responses prevent normal drain/close
+progress when no acceptable peer proof can arrive; message accounting may remain
+locked. A new channel pinned to a recent authenticated key restores future traffic,
+not settlement of the old channel's obligations.
+
+Both provenance and block-state signatures use strictly greater than one third
+of the pinned key's weight. This relies on fewer than one third Byzantine weight
+and honest signers endorsing only valid successors/block roots; it does not assert
+that the network's signature collection threshold is also one third.
 
 A versioned HieroProof envelope selects unchanged StateProof bytes or a bounded
 key-provenance chain. The envelope is specified beside StateProof in HAPI rather

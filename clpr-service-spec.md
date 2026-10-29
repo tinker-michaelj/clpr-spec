@@ -827,8 +827,10 @@ interface IClprVerifier {
   //                          when messages is empty.
   //   new_trust_anchor      : bytes — successor signing authority if the bundle contains
   //                          authenticated rotation evidence; empty bytes if none. MUST be
-  //                          authenticated against trust_anchor under the selected proof
-  //                          profile (state commitment or explicit signed authorization).
+  //                          authenticated against trust_anchor by a state-proven
+  //                          commitment. The named Hiero V1 signed-authorization
+  //                          exception in the proof-system compatibility requirement
+  //                          permits candidate authorization without adoption evidence.
   //   new_trust_anchor_id   : bytes — opaque identifier for new_trust_anchor. MUST be
   //                          non-empty iff new_trust_anchor is non-empty.
   //   new_endpoint_manifest : ClprEndpointManifest — verified manifest if the bundle
@@ -891,8 +893,8 @@ a local implementation detail with no observable effect on the CLPR Service or t
 A transition bundle is required in two situations:
 
 1. **Proactive** — The endpoint detects that the source chain's signing authority has changed (e.g., a new sync
-   committee in the Ethereum beacon state, a validator-set-change transaction on an IBFT chain, or a hinTS
-   key authorization on Hiero). The remote anchor is now behind the source chain; the endpoint
+   committee in the Ethereum beacon state, a validator-set-change transaction on an IBFT chain, or an
+   adopted hinTS key transition on Hiero). The remote anchor is now behind the source chain; the endpoint
    constructs and submits the transition bundle before the next application bundle.
 
 2. **Reactive** — The endpoint reads `trust_anchor_id` from a received sync payload and, after consulting its local
@@ -905,8 +907,9 @@ A transition bundle:
 
 1. Has a `bundle_payload` whose rotation evidence is verifiable by an authority encoded in the current
    `trust_anchor`.
-2. Embeds a state-proven commitment or an explicit signed successor authorization, as defined by the
-   selected proof profile. The verifier validates this evidence and returns `new_trust_anchor` and `new_trust_anchor_id`. If no valid commitment is present the verifier MUST revert.
+2. MUST embed a state-proven commitment to the successor authority, except for the named Hiero V1
+   signed-authorization exception below. The verifier validates the required evidence and returns
+   `new_trust_anchor` and `new_trust_anchor_id`. If no valid evidence is present the verifier MUST revert.
 3. MAY carry zero application messages (trust-only bundle — see §2.1.2 Bundle Progress Criteria, Condition 2).
    If there is no channel-state proof, it MUST return `has_channel_state = false`; zero-message state
    proofs instead return true and remain subject to ordinary channel checks.
@@ -936,9 +939,17 @@ for proof systems with frequent predictable rotations.
 
 For any proof system compatible with CLPR, a proof MUST be constructable that is:
 (a) verifiable by an authority currently encoded in `trust_anchor`, and
-(b) authenticates the new authority, through a state-proven commitment or an explicit signed authorization
-whose acceptance semantics the verifier profile defines. Authorization alone need not prove adoption;
-[Hiero V1](verifiers/hiero/proof_envelope.md) expressly accepts signed candidates without adoption evidence.
+(b) authenticates a state-proven commitment to the new authority.
+
+**Named exception: HieroProof V1 signed successor authorization.** Only the opt-in
+[Hiero V1 profile](verifiers/hiero/proof_envelope.md) defined by this extension may substitute a
+strictly-greater-than-one-third predecessor signature over the exact successor VK bytes for requirement
+(b). This proves authorization, not adoption or unique branch selection. Any party may submit a valid
+candidate authorization and irreversibly strand a channel on an unadopted branch. There is no admin
+re-anchor, and unavailable peer proofs can prevent acknowledgment, drain, and closure. These
+consequences MUST be documented when configuring that profile; they are not a general relaxation
+for other verifier families. Recovery for future traffic requires a new channel with an independently
+trusted current key and does not settle old obligations (see R10).
 
 A source ledger whose authority rotation can only be attested by the new authority, with no overlap where the
 old authority attests to the new authority's commitment, cannot support the CLPR trust anchor model.
@@ -1082,7 +1093,7 @@ change stored channel layout or the opaque `bundle_payload` field.
 Criteria (§2.1.2) holds. Concretely, reject if all of the following are true simultaneously:
 
 - `messages.length == 0`, or `anchor_message_id ≤` this side's own stored `ChannelSyncData.received_message_id` — no new messages
-- `new_trust_anchor_id == Channel.trust_anchor_id` (or `new_trust_anchor` is empty) — trust anchor not advanced
+- `new_trust_anchor` is empty or equals `Channel.trust_anchor` byte for byte — trust anchor not advanced; changing only its ID does not count
 - `new_endpoint_manifest` is empty bytes, or non-empty but `new_endpoint_manifest.version ≤ Channel.endpoint_manifest.version` — manifest not advanced (Criterion 3)
 - `sync_data.received_message_id <= Channel.acked_message_id` — no acknowledgement progress
 - None of the channel-state-transition sub-conditions in Criterion 5 (§2.1.2) hold
@@ -1822,9 +1833,9 @@ queue fills.
 | R2 | Source ledger upgrades proof format         | Breaks when source switches | Register new Channel with new verifier. Applications migrate. Admin closes old Channel.                                                                                                                                                                                                                     | Works (requires new Channel)                                          |
 | R3 | Endpoints rotated (proof format unchanged)  | Broken                      | Manifest-update bundle path (as R1); sync resumes once the peer manifest is refreshed.                                                                                                                                                                                                                            | Works                                                                    |
 | R4 | Endpoints rotated AND proof format changed  | Broken                      | Register new Channel with new verifier. Manifest-update bundle path on new Channel. Admin closes old Channel.                                                                                                                                                                                            | Works (requires new Channel)                                          |
-| R5 | Verifier compromised or broken              | Suspect                     | Admin closes Channel (transitions through CLOSING → DRAINED → CLOSED). Since verifier is immutable, register new Channel with correct verifier.                                                                                                                                                             | Works (data loss on close)                                               |
+| R5 | Verifier compromised or broken | Suspect | Register a new Channel with a correct verifier for future traffic. Admin may initiate closure of the old Channel, but CLOSING must drain and DRAINED can reach CLOSED only after all outbound messages are acknowledged. Unavailable valid peer proofs can block this indefinitely; closure does not discard obligations. | New Channel restores future traffic; old obligations may remain locked |
 | R6 | Queue state permanently corrupted on peer   | Working                     | Channel pauses (§4.5). Auto-resumes if peer fixes ordering. Admin may close a PAUSED Channel (`closeChannel` transitions to CLOSING); the Channel drains once the peer fixes the ordering. If the peer never fixes it, the Channel stays PAUSED (or CLOSING, if the admin closed it) indefinitely. | Works (PAUSED until peer recovers; admin can close to prepare for drain) |
 | R7 | Network partition (endpoints unchanged)     | Temporarily broken          | Syncs resume automatically. Monotonic IDs and running hash verify integrity.                                                                                                                                                                                                                                      | Works                                                                    |
 | R8 | Peer ledger down entirely                   | Broken                      | Messages queue up to `max_queue_depth`, then backpressure. Syncs resume when peer returns.                                                                                                                                                                                                                        | Works                                                                    |
 | R9 | Both sides' endpoints change simultaneously | Broken on both sides        | Any party on either side may submit a manifest-update bundle directly as an on-chain transaction, breaking the deadlock without gRPC connectivity to old endpoints.                                                                                                                                               | Works                                                                    |
-
+| R10 | Hiero V1 anchor stranded on an unadopted or abandoned authorized branch | Broken | Any submitter may install a valid candidate authorization. There is no admin re-anchor or rollback. Use a new Channel with a verifier pinned to an independently authenticated current VK for future traffic. The old Channel can close only after its ordinary drain and acknowledgment obligations are satisfied; outstanding messages/accounting may remain locked when no acceptable peer proof is available. | New Channel required; old Channel may remain CLOSING or DRAINED indefinitely |

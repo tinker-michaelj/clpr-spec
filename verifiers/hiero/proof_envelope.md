@@ -30,7 +30,9 @@ version; unknown versions MUST fail closed, with no retry as a bare StateProof.
 `initial_verification_key` MUST equal the channel's current raw VK byte for byte.
 There MUST be between 1 and 8 links, in forward order. For each link:
 
-1. Validate the successor VK's canonical encoding, group membership, and domain.
+1. Validate the successor VK's canonical encoding, group membership, and supported
+   power-of-two domain. This checks key shape, not the internal consistency of its
+   commitments or the security of its CRS; see the authority assumption below.
 2. Verify `signature` under the preceding VK over **exactly the raw bytes** of
    `next_verification_key`. Do not hash, prefix, ABI-encode, or append epoch IDs.
 3. Require signers' authenticated weight to be strictly greater than one third of
@@ -45,6 +47,13 @@ VK and a 1,248-byte aggregate signature, with the library's canonical scalar and
 point encodings and V2 Fiat–Shamir domains. Other encodings/suites require a new
 version. A verifier MUST validate all links before returning any update.
 
+Key validation does not establish that the domain size agrees with the `Z`
+commitment, that `W` commits to the stated total weight, or that the CRS was
+constructed securely with its trapdoor assumptions satisfied. The predecessor's
+strictly-greater-than-one-third authorization of the exact successor bytes is the
+basis for trusting those properties. The initially pinned key requires the same
+properties to be established out of band.
+
 Success returns `has_channel_state = false`, no messages, no manifest, no channel
 sync data or message anchor, the final raw VK as `new_trust_anchor`, and its 32-byte
 Keccak-256 digest as `new_trust_anchor_id`. The CLPR service commits only these two
@@ -55,7 +64,11 @@ Endpoints may split longer chains into batches of at most eight links, additiona
 bounded by receiver `max_sync_bytes` and execution gas. They MUST begin each batch
 at the receiver's actual current VK, and reread it after a competing update. A
 stale or already applied batch fails the initial-key comparison. Do not concatenate
-state proofs to this payload; submit a state-proof bundle after catch-up.
+state proofs to this payload; submit a state-proof bundle after catch-up. Eight
+links is a wire ceiling, not a guaranteed feasible transaction size: execution
+cost depends on the target chain's precompile pricing and transaction gas cap.
+Endpoints MUST estimate the complete service transaction, including calldata,
+and choose smaller batches when needed.
 
 ## Signed authorization is sufficient
 
@@ -66,25 +79,61 @@ was authorized. Signatures collected before roster adoption are sufficient under
 this profile. Epoch/construction IDs and the provenance queue's inclusion in source
 state are not authenticated by these raw-VK signatures.
 
-Endpoints SHOULD submit the adopted chain observed on the source network for
-availability, but this is not an on-chain security predicate. Multiple valid
-successor authorizations can form branches; a verifier holding one successor need
-not accept a sibling. A source signing authority must not authorize a backward
-edge, reuse an old key as a successor, or endorse an unsafe candidate. The service
-stores only its current anchor, so the within-bundle cycle check cannot detect
-historical cycles across separate transactions. Requiring proof of adoption,
-chronological monotonicity, or uniqueness would need additional signed material
-or authenticated state evidence and a different proof profile.
+Endpoints SHOULD source chains from the consensus node's adopted
+`HINTS_KEY_PROVENANCE` queue and retain that evidence, rather than assembling them
+from raw proof votes. The queue appends a link with adoption, while proof votes
+can expose the same valid authorization before adoption. This endpoint policy
+improves availability; queue inclusion is not an on-chain security predicate.
+
+`submitBundle` is permissionless. Any third party that obtains a valid candidate
+authorization can advance the channel, even if the configured endpoints follow
+only the adopted queue. Multiple valid authorizations can form branches; a
+verifier holding one successor need not accept a sibling. A third party can thus
+strand the channel on an unadopted or abandoned branch from which no usable
+successor or state proof is available. There is no administrative re-anchor or
+rollback path. Recovery for new traffic requires a new channel using a verifier
+pinned to an independently authenticated current key.
+
+Closing the old channel does not bypass this problem: `CLOSING` drains only as
+peer acknowledgments and required responses arrive, and `DRAINED` can close only
+when every outbound message is acknowledged. If the stranded anchor prevents
+those proofs, closure and in-flight message accounting can remain blocked
+indefinitely. A channel with no outstanding drain or acknowledgment obligations
+can still close. A new channel does not settle the old channel's obligations.
+
+A source signing authority must not authorize a backward edge, reuse an old key
+as a successor, or endorse an unsafe candidate. The service stores only its
+current anchor, so the within-bundle cycle check cannot detect historical cycles
+across separate transactions. Requiring proof of adoption, chronological
+monotonicity, uniqueness, administrative re-anchoring, or forced closure would
+change this profile or the service's trust/lifecycle policy.
 
 ## State-proof payload
 
-Verify the unchanged StateProof's Merkle paths and authenticate the 48-byte block
-root with hinTS under the **current stored VK**. V1 accepts a block signature of
+Verify the unchanged StateProof's Merkle paths using SHA-384 and authenticate the
+48-byte block root with hinTS under the **current stored VK**. The block-signature acceptance
+threshold is strictly greater than one third of the stored key's total weight,
+with authenticated signer weight and exact-one-third rejection, just as for
+provenance links. This is a verifier policy, not a claim that the source network
+uses the same collection threshold: network configuration, native-library
+defaults, and HAPI descriptions may require higher fractions. The VK does not
+encode a threshold. This policy relies on fewer than one third of the weight
+being Byzantine and on honest signers signing only valid block roots; exceeding
+one third then includes honest weight. Changing this threshold requires an
+explicit profile change, not inference from proof bytes.
+
+This state-proof arm supports SHA-384-configured sources only; SHA-256 requires
+a different profile. The leaf bindings, domain bytes, and source construction
+references are in [Hiero state proofs](state_proof.md).
+
+V1 accepts a block signature of
 `VK (1096 bytes) || hinTS signature (1248 bytes)`, or the native 13,712-byte combined
 TSS representation whose first 2,344 bytes are that prefix. In the latter form the
 remaining 11,368 WRAPS bytes are not authority evidence in this profile; the
 prefix VK MUST still match the stored anchor exactly. No arbitrary suffix lengths
-are permitted. All required paths must converge to the authenticated block root;
+are permitted. Endpoints MUST normalize any other composite signature
+representation to the 2,344-byte compact form, preserving the exact VK and hinTS
+aggregate bytes. All required paths must converge to the authenticated block root;
 the proven channel identity must match the channel context, and carried endpoint
 manifests must match its remote service address.
 
@@ -100,8 +149,18 @@ A key supplied only by an untrusted bundle cannot bootstrap itself. A pinned-key
 verifier may decode the usual configuration control payload and seed the anchor
 from its deployment configuration; decoding that payload does not make it a state
 proof. Channel-establishment governance retains responsibility for that config.
+Every new channel established through this verifier starts from its deployment's
+pinned initial key, even if older channels have already advanced. Catch-up cost
+therefore grows with rotations since that pin. Operators SHOULD periodically
+deploy a verifier pinned to an independently authenticated recent VK for new
+channels; this does not re-anchor existing channels.
+
 An optional config-time manifest proof must use the state-proof envelope and the
-pinned initial key.
+pinned initial key. It cannot use a provenance chain to reach a later key during
+configuration. A current manifest proof signed only by a later key is therefore
+unusable at setup under an older pin. Either configure with a verifier pinned to
+a suitable current key, or omit the optional manifest proof, catch up after
+channel creation, and then prove the manifest in a state-proof bundle.
 
 The shared verifier interface adds an explicit final `has_channel_state` boolean.
 All verifiers used by that service must implement it; older return tuples cannot

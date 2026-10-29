@@ -16,7 +16,7 @@ profile, its proposed HAPI schema, and the authorization-versus-adoption distinc
 
 ## Directory layout
 
-Each chain directory contains three files:
+Each chain directory provides these core documents and may add profile-specific schemas or references:
 
 | File | Contents |
 |------|----------|
@@ -31,7 +31,11 @@ Each chain directory contains three files:
 | Hiero | `hiero/` | Ledger ID/WRAPS, or explicitly trusted hinTS VK | Key-provenance extension proposed |
 | QBFT (Besu) | `qbft/` | ABI-encoded validator + epoch | Production |
 
-## Standard file outlines
+Hiero additionally contains `proof_envelope.md` (the normative V1 profile) and
+`hiero_proof.proto` (its proposed HAPI schema). Its core documents link to those
+shared definitions rather than duplicate the wire and authorization rules.
+
+## Recommended topics
 
 ### `state_proof.md`
 1. **Overview** — what this chain's state proof scheme proves and its role in bundle verification
@@ -60,7 +64,7 @@ Each chain directory contains three files:
 ## Adding a new chain
 
 1. Create a subdirectory named after the chain (lowercase, no spaces).
-2. Add `state_proof.md`, `verifier_contract.md`, and `trust_anchor.md` using the structure described above.
+2. Add `state_proof.md`, `verifier_contract.md`, and `trust_anchor.md` covering the topics above. Profile-specific schemas and shared normative documents may supply details through explicit links.
 3. Implement `IClprVerifier` in `clpr-smart-contracts/src/verifiers/<chain>/`.
 4. Register the verifier address in the `ClprService` deployment for the target network.
 5. Add an inbound `BundlePayloadCodec` in `clpr-relay` if the chain can act as a remote peer.
