@@ -455,8 +455,8 @@ Channel {
   verifier_fingerprint    : bytes       // code hash of verifier_contract at registration time (informational)
   trust_anchor            : bytes       // opaque signing-authority material for this Channel; initialized from
                                         // verifyConfig's initial_trust_anchor return; updated in-band when
-                                        // verifyBundle returns a non-empty new_trust_anchor. Its profile may hold a
-                                        // ledger identity or an explicitly trusted VK, allowing a verifier to
+                                        // verifyBundle returns a non-empty new_trust_anchor. For Hiero TSS this
+                                        // is the peer ledger_id, allowing a single generic verifier contract to
                                         // serve all Hiero networks. Only verifiers with no rotating-authority
                                         // concept store empty bytes. Only verifyBundle may
                                         // cause an update; no admin or governance path modifies this field.
@@ -826,11 +826,9 @@ interface IClprVerifier {
   //                          anchor_message_id. Chain-specific absent/sentinel value
   //                          when messages is empty.
   //   new_trust_anchor      : bytes — successor signing authority if the bundle contains
-  //                          authenticated rotation evidence; empty bytes if none. MUST be
-  //                          authenticated against trust_anchor by a state-proven
-  //                          commitment. The named Hiero V1 signed-authorization
-  //                          exception in the proof-system compatibility requirement
-  //                          permits candidate authorization without adoption evidence.
+  //                          state-proven rotation evidence; empty bytes if none. MUST be
+  //                          state-proven against trust_anchor or MUST revert, except for a
+  //                          listed verifier-family exception (§3.2).
   //   new_trust_anchor_id   : bytes — opaque identifier for new_trust_anchor. MUST be
   //                          non-empty iff new_trust_anchor is non-empty.
   //   new_endpoint_manifest : ClprEndpointManifest — verified manifest if the bundle
@@ -840,6 +838,8 @@ interface IClprVerifier {
   //                          False denotes an authority-only update: all sync/message
   //                          anchor fields are zero/absent, messages and manifest empty,
   //                          and a different non-empty successor and ID are required.
+  //                          Absence is explicit because a verified proof can itself
+  //                          yield all-zero sync data.
   //
   // Used during:
   //   - submitBundle (on-chain bundle processing)
@@ -872,8 +872,8 @@ unproven. On each sync cycle the endpoint performs the following:
    remote chain's state once and cache them by identifier.
 3. Determine whether the endpoint can produce source chain state proofs verifiable under that signing authority.
 4. If yes — submit a normal bundle containing state proofs of pending messages.
-5. If no — construct and submit one or more transition bundles, each embedding rotation evidence authenticated under the selected
-   verifier profile inside `bundle_payload`, until the remote ledger's trust anchor reaches signing authority for which the
+5. If no — construct and submit one or more transition bundles, each embedding rotation evidence as a state-proven
+   commitment inside `bundle_payload`, until the remote ledger's trust anchor reaches signing authority for which the
    endpoint can produce valid proofs. Then proceed to step 4.
 
 **Endpoint local record.** Each CLPR endpoint MUST maintain, per Channel, a local ordered sequence of
@@ -893,8 +893,8 @@ a local implementation detail with no observable effect on the CLPR Service or t
 A transition bundle is required in two situations:
 
 1. **Proactive** — The endpoint detects that the source chain's signing authority has changed (e.g., a new sync
-   committee in the Ethereum beacon state, a validator-set-change transaction on an IBFT chain, or an
-   adopted hinTS key transition on Hiero). The remote anchor is now behind the source chain; the endpoint
+   committee in the Ethereum beacon state, a validator-set-change transaction on an IBFT chain, or a ledger-ID
+   succession commitment in the Hiero state tree). The remote anchor is now behind the source chain; the endpoint
    constructs and submits the transition bundle before the next application bundle.
 
 2. **Reactive** — The endpoint reads `trust_anchor_id` from a received sync payload and, after consulting its local
@@ -905,11 +905,12 @@ A transition bundle is required in two situations:
 
 A transition bundle:
 
-1. Has a `bundle_payload` whose rotation evidence is verifiable by an authority encoded in the current
+1. Has a `bundle_payload` whose state proof is verifiable by an authority encoded in the current
    `trust_anchor`.
-2. MUST embed a state-proven commitment to the successor authority, except for the named Hiero V1
-   signed-authorization exception below. The verifier validates the required evidence and returns
-   `new_trust_anchor` and `new_trust_anchor_id`. If no valid evidence is present the verifier MUST revert.
+2. Embeds a state-proven commitment to a new or additional authority, unless the Channel's verifier
+   implements a listed exception (see Verifier-family exceptions below). The verifier validates the
+   required evidence and returns `new_trust_anchor` and `new_trust_anchor_id`. If no valid evidence is
+   present the verifier MUST revert.
 3. MAY carry zero application messages (trust-only bundle — see §2.1.2 Bundle Progress Criteria, Condition 2).
    If there is no channel-state proof, it MUST return `has_channel_state = false`; zero-message state
    proofs instead return true and remain subject to ordinary channel checks.
@@ -939,17 +940,13 @@ for proof systems with frequent predictable rotations.
 
 For any proof system compatible with CLPR, a proof MUST be constructable that is:
 (a) verifiable by an authority currently encoded in `trust_anchor`, and
-(b) authenticates a state-proven commitment to the new authority.
+(b) contains a state-proven commitment to the new authority.
 
-**Named exception: HieroProof V1 signed successor authorization.** Only the opt-in
-[Hiero V1 profile](verifiers/hiero/proof_envelope.md) defined by this extension may substitute a
-strictly-greater-than-one-third predecessor signature over the exact successor VK bytes for requirement
-(b). This proves authorization, not adoption or unique branch selection. Any party may submit a valid
-candidate authorization and irreversibly strand a channel on an unadopted branch. There is no admin
-re-anchor, and unavailable peer proofs can prevent acknowledgment, drain, and closure. These
-consequences MUST be documented when configuring that profile; they are not a general relaxation
-for other verifier families. Recovery for future traffic requires a new channel with an independently
-trusted current key and does not settle old obligations (see R10).
+**Verifier-family exceptions.** A verifier family may replace (b) with a different successor-authentication
+rule only if it is listed in the [exception registry](verifiers/README.md#exceptions) and its specification
+states the rule's trust assumptions, its failure modes, and any irreversible loss of liveness or settlement
+it permits. An exception applies only to Channels whose verifier implements it; it does not relax (b) for
+any other verifier.
 
 A source ledger whose authority rotation can only be attested by the new authority, with no overlap where the
 old authority attests to the new authority's commitment, cannot support the CLPR trust anchor model.
@@ -957,17 +954,17 @@ old authority attests to the new authority's commitment, cannot support the CLPR
 ### Catch-up across multiple missed rotations
 
 If the endpoint was offline across N rotations, it submits N consecutive transition bundles before resuming
-application bundles. Each is verified against the trust anchor installed by the previous transition. Endpoints must retain or retrieve the historical rotation evidence required by their verifier profile;
-availability of that evidence is a prerequisite for catch-up. With a window encoding, the endpoint can
+application bundles. Each is verified against the trust anchor installed by the previous transition. Historical
+boundary blocks remain available in the source chain's immutable record. With a window encoding, the endpoint can
 additionally batch window-advances into regular application bundles rather than requiring separate
 trust-only bundles.
 
 A verifier MAY support batching multiple rotations into a single `bundle_payload`. In this case the verifier
 walks the chain of rotation proofs internally — each sub-proof verified against the authority derived by the
 previous step — and returns only the final `new_trust_anchor` and `new_trust_anchor_id`. The CLPR Service sees
-a single `verifyBundle` call; the intermediate authorities are never stored on-chain. Profiles MUST bound
-their batch size. Application messages proven under the final authority MAY be included only if the profile
-explicitly supports them; Hiero V1 uses separate provenance-only and state-proof bundles.
+a single `verifyBundle` call; the intermediate authorities are never stored on-chain. This optimization reduces
+the number of on-chain transactions required for catch-up from N+1 to 1. Application messages proven under the
+final authority MAY be included in the same bundle.
 
 ## 3.3 Connector Authorization Interface
 
@@ -1086,7 +1083,7 @@ A verifier failure or invalid result leaves the original authority unchanged.
 The presence flag is a coordinated verifier/service interface revision. Existing state-proof verifiers
 MUST return true; callers MUST NOT infer absence from an all-zero struct or silently accept the older
 return tuple. Implementations using the earlier combined `QueueMetadata` return shape append the
-same flag and require the entire metadata struct to be zero when false. This extension does not
+same flag and require the entire metadata struct to be zero when false. This revision does not
 change stored channel layout or the opaque `bundle_payload` field.
 
 **Step 1a — NoProgress check.** Reject the bundle with `NoProgress` if none of the five Bundle Progress
@@ -1327,8 +1324,8 @@ The CLPR Service:
 4. Stores the returned `ChannelContext` as `Channel.channel_context` (immutable thereafter). Stores
    `initial_trust_anchor` as `Channel.trust_anchor` and `initial_trust_anchor_id` as
    `Channel.trust_anchor_id`. If `initial_trust_anchor` is empty, both are empty bytes.
-   For Hiero verifiers, the initial authority is the authenticated ledger ID or explicitly trusted VK,
-   according to the selected proof profile. For verifiers with no rotating-authority concept, `initial_trust_anchor` is empty bytes.
+   For Hiero TSS verifiers, the initial trust anchor is the peer's `ledger_id` extracted from the config
+   proof. For verifiers with no rotating-authority concept, `initial_trust_anchor` is empty bytes.
 5. Stores the returned `ClprEndpointManifest` as `Channel.endpoint_manifest`, truncated to
    `ClprThrottles.max_peer_endpoints` if the endpoint list exceeds that limit (§2.4.2).
    `Channel.endpoint_manifest.version` MUST be ≥ 1 after this step.
@@ -1444,7 +1441,7 @@ registerChannel(
 //   4. Stores ctx as Channel.channel_context (immutable thereafter). Stores
 //      initial_trust_anchor as Channel.trust_anchor and initial_trust_anchor_id as
 //      Channel.trust_anchor_id. For Hiero TSS verifiers this
-//      is the selected profile's ledger identity or explicitly trusted VK. For verifiers with no rotating authority, both are
+//      is the peer's ledger_id. For verifiers with no rotating authority, both are
 //      empty bytes. This is the only path other than verifyBundle that may write
 //      Channel.trust_anchor.
 //   5. Stores the returned ClprEndpointManifest as Channel.endpoint_manifest (§2.4.2).
@@ -1833,9 +1830,9 @@ queue fills.
 | R2 | Source ledger upgrades proof format         | Breaks when source switches | Register new Channel with new verifier. Applications migrate. Admin closes old Channel.                                                                                                                                                                                                                     | Works (requires new Channel)                                          |
 | R3 | Endpoints rotated (proof format unchanged)  | Broken                      | Manifest-update bundle path (as R1); sync resumes once the peer manifest is refreshed.                                                                                                                                                                                                                            | Works                                                                    |
 | R4 | Endpoints rotated AND proof format changed  | Broken                      | Register new Channel with new verifier. Manifest-update bundle path on new Channel. Admin closes old Channel.                                                                                                                                                                                            | Works (requires new Channel)                                          |
-| R5 | Verifier compromised or broken | Suspect | Register a new Channel with a correct verifier for future traffic. Admin may initiate closure of the old Channel, but CLOSING must drain and DRAINED can reach CLOSED only after all outbound messages are acknowledged. Unavailable valid peer proofs can block this indefinitely; closure does not discard obligations. | New Channel restores future traffic; old obligations may remain locked |
+| R5 | Verifier compromised or broken              | Suspect                     | Admin closes Channel (transitions through CLOSING → DRAINED → CLOSED). Since verifier is immutable, register new Channel with correct verifier.                                                                                                                                                             | Works (data loss on close)                                               |
 | R6 | Queue state permanently corrupted on peer   | Working                     | Channel pauses (§4.5). Auto-resumes if peer fixes ordering. Admin may close a PAUSED Channel (`closeChannel` transitions to CLOSING); the Channel drains once the peer fixes the ordering. If the peer never fixes it, the Channel stays PAUSED (or CLOSING, if the admin closed it) indefinitely. | Works (PAUSED until peer recovers; admin can close to prepare for drain) |
 | R7 | Network partition (endpoints unchanged)     | Temporarily broken          | Syncs resume automatically. Monotonic IDs and running hash verify integrity.                                                                                                                                                                                                                                      | Works                                                                    |
 | R8 | Peer ledger down entirely                   | Broken                      | Messages queue up to `max_queue_depth`, then backpressure. Syncs resume when peer returns.                                                                                                                                                                                                                        | Works                                                                    |
 | R9 | Both sides' endpoints change simultaneously | Broken on both sides        | Any party on either side may submit a manifest-update bundle directly as an on-chain transaction, breaking the deadlock without gRPC connectivity to old endpoints.                                                                                                                                               | Works                                                                    |
-| R10 | Hiero V1 anchor stranded on an unadopted or abandoned authorized branch | Broken | Any submitter may install a valid candidate authorization. There is no admin re-anchor or rollback. Use a new Channel with a verifier pinned to an independently authenticated current VK for future traffic. The old Channel can close only after its ordinary drain and acknowledgment obligations are satisfied; outstanding messages/accounting may remain locked when no acceptable peer proof is available. | New Channel required; old Channel may remain CLOSING or DRAINED indefinitely |
+

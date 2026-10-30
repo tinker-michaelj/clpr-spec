@@ -35,6 +35,18 @@ Hiero additionally contains `proof_envelope.md` (the normative V1 profile) and
 `hiero_proof.proto` (its proposed HAPI schema). Its core documents link to those
 shared definitions rather than duplicate the wire and authorization rules.
 
+## Exceptions
+
+A verifier must authenticate successor authority with a state-proven commitment
+([proof system compatibility requirement](../clpr-service-spec.md#proof-system-compatibility-requirement))
+unless its rule is listed here. A listed rule applies only to Channels whose verifier implements
+it, and its specification states the trust assumptions, the failure modes, and any irreversible
+loss of liveness or settlement it permits.
+
+| Rule | Verifier | Specification |
+|------|----------|---------------|
+| Hiero V1 signed successor authorization | `HieroProvenanceVerifier` | [proof_envelope.md](hiero/proof_envelope.md) |
+
 ## Recommended topics
 
 ### `state_proof.md`
